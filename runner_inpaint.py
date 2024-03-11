@@ -52,8 +52,9 @@ if __name__ == "__main__":
     use_pipeline = False
     if use_pipeline:
         # CUDA
+        print(f"use_pipeline")
         pipe = PaintWithWord_StableDiffusionInpaintPipeline.from_pretrained(
-            "runwayml/stable-diffusion-inpainting",
+            "./sdmodels/runwayml/stable-diffusion-inpainting",
             revision="fp16",
             torch_dtype=torch.float16,
         )
@@ -74,13 +75,14 @@ if __name__ == "__main__":
                 generator=generator
         ).images[0]
     else:
+        print(f"test,paint_with_words_inpaint")
         img = paint_with_words_inpaint(
             color_context=color_context,
             color_map_image=color_map_image,
             init_image=init_image,
             mask_image=mask_image,
             input_prompt=input_prompt,
-            num_inference_steps=150,
+            num_inference_steps=2,
             guidance_scale=7.5,
             device="cuda:0",
             seed=81,

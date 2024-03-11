@@ -10,7 +10,7 @@ from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPFeatureExtractor
 import torchvision.transforms as T
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipelineOutput
-
+import cv2
 
 from .paint_with_words import (
     PaintWithWord_StableDiffusionPipeline,
@@ -133,6 +133,34 @@ def prepare_mask_latents(
     masked_image_latents = masked_image_latents.to(device=device, dtype=dtype)
     return mask, masked_image_latents
 
+def savelatents(mask,filename,extra=None):
+    print(f"savelatents,mask.shape:{mask.shape},filename:{filename}")
+        # 获取张量的宽度和高度
+    height, width = mask.shape[2], mask.shape[3]
+
+    # 将张量转换为NumPy数组，并进行数据类型转换
+    if mask.shape[1] > 1:
+        print(f"savelatents,mask.shape[1]:{mask.shape[1]}")
+        array = (mask.cpu().detach().numpy() * 255).astype('uint8').transpose(0, 2, 3, 1)
+        # 遍历每个通道保存为图像文件
+        for channel in range(array.shape[-1]):
+            # 创建PIL图像对象
+            image = Image.fromarray(array[0, :, :, channel])
+
+            # 保存为图像文件
+            image.save(f'./testpic/channel_{channel}'+filename)
+        #image = Image.fromarray(array[0])
+        #image.save(str(extra)+filename)
+        #for ii in range(mask.shape[1]):
+        #cv2.imwrite(str(ii)+filename, array[ii])
+    else:
+        array = (mask.cpu().detach().numpy() * 255).astype('uint8')
+        # 将NumPy数组转换为PIL图像对象
+        image = Image.fromarray(array.reshape(height, width))
+
+        image.save('./testpic/'+str(extra)+filename)
+
+
 
 @torch.no_grad()
 @torch.autocast("cuda")
@@ -149,13 +177,13 @@ def paint_with_words_inpaint(
     device: str = "cuda:0",
     weight_function: Callable = lambda w, sigma, qk: 0.1 * w * math.log(sigma + 1) * qk.max(),
     local_model_path: Optional[str] = None,
-    hf_model_path: Optional[str] = "runwayml/stable-diffusion-inpainting",
+    hf_model_path: Optional[str] = f"./sdmodels/runwayml/stable-diffusion-inpainting",
     preloaded_utils: Optional[Tuple] = None,
     unconditional_input_prompt: str = "",
     model_token: Optional[str] = None,
     strength: float = 1.0,
 ):
-
+    print(f"test,paint_with_words_inpaint income")
     vae, unet, text_encoder, tokenizer, scheduler = (
         pww_load_tools(
             device,
@@ -177,6 +205,16 @@ def paint_with_words_inpaint(
 
     mask, masked_image = prepare_mask_and_masked_image(init_image, mask_image)
     
+    #print(f"mask.shape:{mask.shape},mask:{mask},masked_image.shape:{masked_image.shape},masked_image:{masked_image}")
+    #print(f"mask.shape:{mask.shape},mask:{mask},masked_image.shape:{masked_image.shape}")
+    print(f"mask.shape:{mask.shape},masked_image.shape:{masked_image.shape}")
+    #maski = Image.fromarray(mask.astype(np.uint8))
+    #mask.save("mask.png")
+    
+    #masked_image = Image.fromarray(masked_image.astype(np.uint8))
+    #masked_image.save("masked_image.jpg")
+
+
     scheduler.set_timesteps(num_inference_steps)
     offset = scheduler.config.get("steps_offset", 0)
     init_timestep = int(num_inference_steps * strength) + offset
@@ -210,9 +248,31 @@ def paint_with_words_inpaint(
         generator=generator,
         do_classifier_free_guidance=False,
     )
+    '''
+    # 获取张量的宽度和高度
+    height, width = mask.shape[2], mask.shape[3]
+
+    # 将张量转换为NumPy数组，并进行数据类型转换
+    array = (mask.cpu().detach().numpy() * 255).astype('uint8')
+
+    # 将NumPy数组转换为PIL图像对象
+    image = Image.fromarray(array.reshape(height, width))
+
+    image.save('mask0.png')
+    '''
+    savelatents(mask,'mask0.png')
+
+    print(f"masked_image_latents00 mask.shape:{mask.shape},masked_image_latents.shape:{masked_image_latents.shape}")
+
     mask = F.interpolate(mask, size=latents.shape[-2:], mode='nearest')
-    masked_image_latents = F.interpolate(masked_image_latents, size=latents.shape[-2:], mode='nearest')
+
+    savelatents(mask,'mask1.png')
     
+    savelatents(masked_image_latents,'masked_image_latents0.png')
+    masked_image_latents = F.interpolate(masked_image_latents, size=latents.shape[-2:], mode='nearest')
+    savelatents(masked_image_latents,'masked_image_latents1.png')
+    print(f"masked_image_latents11 mask.shape:{mask.shape},masked_image_latents.shape:{masked_image_latents.shape}")
+
     # Check that sizes of mask, masked image and latents match
     num_channels_latents = latents.shape[1]
     num_channels_mask = mask.shape[1]
@@ -233,8 +293,15 @@ def paint_with_words_inpaint(
         sigma = scheduler.sigmas[step_index]
 
         latent_model_input = scheduler.scale_model_input(latents, t)
-        
+        if t<2:
+            print(f"00,latent_model_input.shape:{latent_model_input.shape}")
+            savelatents(latent_model_input,'latent_model_input.png',str(t))
+
         latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+
+        if t<2:
+            print(f"11,latent_model_input.shape:{latent_model_input.shape}")
+            savelatents(latent_model_input,'catlatent_model_input.png',str(t))
         _t = t if not is_mps else t.float()
         encoder_hidden_states.update({
                 "SIGMA": sigma,
@@ -521,7 +588,9 @@ class PaintWithWord_StableDiffusionInpaintPipeline(PaintWithWord_StableDiffusion
                 sigma = self.scheduler.sigmas[step_index]
 
                 latent_model_input = self.scheduler.scale_model_input(latents, t)
+
                 latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+
                 # _t = t if not is_mps else t.float()
                 encoder_hidden_states.update({
                         "SIGMA": sigma,

@@ -3,7 +3,9 @@ from typing import Callable, Dict, List, Optional, Tuple,Union
 
 import numpy as np
 import PIL
+
 import torch
+torch.set_printoptions(profile="full")
 import torch.nn.functional as F
 from diffusers import AutoencoderKL, LMSDiscreteScheduler, UNet2DConditionModel
 from PIL import Image
@@ -59,16 +61,18 @@ def _pil_from_latents(vae, latents):
 
 @torch.autocast("cuda")
 def inj_forward(self, hidden_states, context=None, mask=None):
-
+    contextnone = True
     is_dict_format = True
     if context is not None:
         try:
+            contextnone = False
             context_tensor = context["CONTEXT_TENSOR"]
         except:
             context_tensor = context
             is_dict_format = False
 
     else:
+        contextnone = True
         context_tensor = hidden_states
 
     batch_size, sequence_length, _ = hidden_states.shape
@@ -85,7 +89,7 @@ def inj_forward(self, hidden_states, context=None, mask=None):
     value = self.reshape_heads_to_batch_dim(value)
 
     attention_scores = torch.matmul(query, key.transpose(-1, -2))
-
+    #print(f"query.shape:{query.shape},key.shape:{key.shape},value.shape:{value.shape},dim:{dim}")
     attention_size_of_img = attention_scores.shape[-2]
     if context is not None:
         if is_dict_format:
@@ -102,12 +106,28 @@ def inj_forward(self, hidden_states, context=None, mask=None):
                 else:
                     w = 0
             sigma = context["SIGMA"]
-
+            
             cross_attention_weight = f(w, sigma, attention_scores)
         else:
             cross_attention_weight = 0.0
     else:
         cross_attention_weight = 0.0
+    
+    '''
+    if attention_size_of_img == 64:
+        #print(f"attention_scores.shape:{attention_scores.shape},cross_attention_weight.shape:{cross_attention_weight.shape},context_tensor.shape:{context_tensor.shape}")
+        #hidden_states.shape:{hidden_states.shape},context_tensor.shape:{context_tensor.shape}")
+        print(f"context_tensor.shape:{context_tensor.shape},contextnone:{contextnone},is_dict_format:{is_dict_format}")
+        if contextnone == False:
+            with open("inj_forward_cross_attention_weight_64.txt", "w") as file:
+            # 写入大量内容到文件
+                file.write(f"{cross_attention_weight}\n")
+            
+            with open("inj_forward_attention_scores_64.txt", "w") as file:
+            # 写入大量内容到文件
+                file.write(f"{attention_scores}\n")
+            exit()
+    '''
 
     attention_scores = (attention_scores + cross_attention_weight) * self.scale
 
@@ -218,6 +238,7 @@ def _image_context_seperator(
         for color, v in color_context.items():
             f = v.split(",")[-1]
             v = ",".join(v.split(",")[:-1])
+            print(f"v:{v}")
             f = float(f)
             v_input = _tokenizer(
                 v,
@@ -225,6 +246,7 @@ def _image_context_seperator(
                 truncation=True,
             )
             v_as_tokens = v_input["input_ids"][1:-1]
+            print(f"v_as_tokens:{v_as_tokens}")
             if isinstance(color, str):
                 r, g, b = color[1:3], color[3:5], color[5:7]
                 color = (int(r, 16), int(g, 16), int(b, 16))
@@ -235,7 +257,9 @@ def _image_context_seperator(
 
             img_where_color = torch.tensor(img_where_color, dtype=torch.float32) * f
 
+            
             ret_lists.append((v_as_tokens, img_where_color))
+            #(f"img_where_color:{img_where_color}")
     else:
         w, h = 512, 512
 
@@ -254,25 +278,34 @@ def _tokens_img_attention_weight(
     w_r, h_r = always_round(w/ratio), always_round(h/ratio)
     ret_tensor = torch.zeros((w_r * h_r, len(token_lis)), dtype=torch.float32)
     
+    print(f"w_r:{w_r},h_r:{h_r}")
     for v_as_tokens, img_where_color in img_context_seperated:
         is_in = 0
         for idx, tok in enumerate(token_lis):
             if token_lis[idx : idx + len(v_as_tokens)] == v_as_tokens:
                 is_in = 1
 
-                # print(token_lis[idx : idx + len(v_as_tokens)], v_as_tokens)
+                print(token_lis[idx : idx + len(v_as_tokens)], v_as_tokens,len(v_as_tokens))
+                temp1 = _img_importance_flatten(img_where_color, w_r, h_r)
+                print(f"test,_img_importance_flatten,temp1.shape:{temp1.shape}")
+                if  w_r == 8:
+                    print(f"test,tok:{tok},temp1:{temp1}")
+                temp2 = temp1.reshape(-1, 1)
+                print(f"test,_img_importance_flatten,temp2.shape:{temp2.shape}")
+                temp3 = temp2.repeat(1, len(v_as_tokens))
+                print(f"test,_img_importance_flatten,temp3.shape:{temp3.shape}")
                 ret_tensor[:, idx : idx + len(v_as_tokens)] += (
-                    _img_importance_flatten(img_where_color, w_r, h_r)
-                    .reshape(-1, 1)
-                    .repeat(1, len(v_as_tokens))
+                    temp3
                 )
+                print(f"test,after ret_tensor,idx:{idx},ret_tensor.shape:{ret_tensor.shape}")
+                #print(ret_tensor[:, idx : idx + len(v_as_tokens)], v_as_tokens)
 
         if not is_in == 1:
             print(f"Warning ratio {ratio} : tokens {v_as_tokens} not found in text")
 
     if original_shape:
         ret_tensor = ret_tensor.reshape((w_r, h_r, len(token_lis)))
-
+        print(f"test,original_shape ret_tensor.shape:{ret_tensor.shape}")
     return ret_tensor
 
 
@@ -333,28 +366,46 @@ def _encode_text_color_inputs(
     seperated_word_contexts, width, height = _image_context_seperator(
         color_map_image, color_context, tokenizer
     )
-    
+    #print(f"seperated_word_contexts.shape:{seperated_word_contexts.shape}")
     # Smooth mask with extra sigma if applicable
     if is_extra_sigma:
         print('Use extra sigma to smooth mask', extra_sigmas)
         seperated_word_contexts = _blur_image_mask(seperated_word_contexts, extra_sigmas)
     
     # Compute cross-attention weights
+    #(f"text_input:{text_input}")
     cross_attention_weight_1 = _tokens_img_attention_weight(
         seperated_word_contexts, text_input, ratio=1, original_shape=True
     ).to(device)
+    print(f"cross_attention_weight_1.shape:{cross_attention_weight_1.shape}")
+    #print(f"cross_attention_weight_1:{cross_attention_weight_1}")
     cross_attention_weight_8 = _tokens_img_attention_weight(
         seperated_word_contexts, text_input, ratio=8
     ).to(device)
+    print(f"cross_attention_weight_8.shape:{cross_attention_weight_8.shape}")
+    #print(f"cross_attention_weight_8:{cross_attention_weight_8}")
     cross_attention_weight_16 = _tokens_img_attention_weight(
         seperated_word_contexts, text_input, ratio=16
     ).to(device)
+
+    print(f"cross_attention_weight_16.shape:{cross_attention_weight_16.shape}")
+    #print(f"cross_attention_weight_16:{cross_attention_weight_16}")
     cross_attention_weight_32 = _tokens_img_attention_weight(
         seperated_word_contexts, text_input, ratio=32
     ).to(device)
+
+    print(f"cross_attention_weight_32.shape:{cross_attention_weight_32.shape}")
+    #print(f"cross_attention_weight_32:{cross_attention_weight_32}")
     cross_attention_weight_64 = _tokens_img_attention_weight(
         seperated_word_contexts, text_input, ratio=64
     ).to(device)
+
+    print(f"cross_attention_weight_64.shape:{cross_attention_weight_64.shape}")
+    #print(f"cross_attention_weight_64:{cross_attention_weight_64}")
+    
+    with open("cross_attention_weight_64.txt", "w") as file:
+    # 写入大量内容到文件
+        file.write(f"{cross_attention_weight_64}\n")
 
     # Compute conditional and unconditional embeddings
     cond_embeddings = text_encoder(text_input.input_ids.to(device))[0]
@@ -366,7 +417,7 @@ def _encode_text_color_inputs(
         return_tensors="pt",
     )
     uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
-
+    print(f"test,cond_embeddings.shape:{cond_embeddings.shape},uncond_embeddings.shape:{uncond_embeddings.shape}")
     encoder_hidden_states = {
         "CONTEXT_TENSOR": cond_embeddings,
         f"CROSS_ATTENTION_WEIGHT_ORIG": cross_attention_weight_1,
@@ -375,7 +426,7 @@ def _encode_text_color_inputs(
         f"CROSS_ATTENTION_WEIGHT_{always_round(height/32)*always_round(width/32)}": cross_attention_weight_32,
         f"CROSS_ATTENTION_WEIGHT_{always_round(height/64)*always_round(width/64)}": cross_attention_weight_64,
     }
-
+    #print(f"encoder_hidden_states:{encoder_hidden_states}")
     uncond_encoder_hidden_states = {
         "CONTEXT_TENSOR": uncond_embeddings,
         f"CROSS_ATTENTION_WEIGHT_ORIG": 0,
@@ -404,7 +455,8 @@ def paint_with_words(
     * math.log(sigma + 1)
     * qk.max(),
     local_model_path: Optional[str] = None,
-    hf_model_path: Optional[str] = "CompVis/stable-diffusion-v1-4",
+    #hf_model_path: Optional[str] = "CompVis/stable-diffusion-v1-4",
+    hf_model_path: Optional[str] = f"./sdmodels/runwayml/stable-diffusion-inpainting",
     preloaded_utils: Optional[Tuple] = None,
     unconditional_input_prompt: str = "",
     model_token: Optional[str] = None,
@@ -442,8 +494,10 @@ def paint_with_words(
 
     # Latent:
     if init_image is None:  # txt2img
+        
         latent_size = (1, unet.in_channels, height // 8, width // 8)
         latents = torch.randn(latent_size, generator=torch.manual_seed(seed))
+        print(f"init_image is None,unet.in_channels:{unet.in_channels},latent_size:{latent_size},latents.shape:{latents.shape}")
         if is_extra_seed:
             print('Use region based seeding: ', extra_seeds)
             multi_latents = [torch.randn(latent_size,
@@ -467,7 +521,10 @@ def paint_with_words(
         init_latents = scheduler.add_noise(init_latents, noise, latent_timestep)
         latents = init_latents
     
+    print(f"latents.shape:{latents.shape}")
+    
     is_mps = device == "mps"
+    
     for t in tqdm(timesteps):
         # sigma for pww
         step_index = (scheduler.timesteps == t).nonzero().item()
@@ -485,7 +542,7 @@ def paint_with_words(
             _t,
             encoder_hidden_states=encoder_hidden_states,
         ).sample
-
+        
         latent_model_input = scheduler.scale_model_input(latents, t)
 
         uncond_encoder_hidden_states.update({
@@ -497,12 +554,13 @@ def paint_with_words(
             _t,
             encoder_hidden_states=uncond_encoder_hidden_states,
         ).sample
-
+        
         noise_pred = noise_pred_uncond + guidance_scale * (
             noise_pred_text - noise_pred_uncond
         )
 
         # compute the previous noisy sample x_t -> x_t-1
+        print(f"noise_pred_text.shape:{noise_pred_text.shape},noise_pred.shape:{noise_pred.shape},t.shape:{t.shape},latents.shape:{latents.shape}")
         latents = scheduler.step(noise_pred, t, latents).prev_sample
 
     ret_pil_images = _pil_from_latents(vae, latents)
